@@ -767,6 +767,28 @@ def _chat_template_enabled(parameters: dict[str, Any]) -> bool:
     return enabled
 
 
+_TINYTRUTHFULQA_ANCHOR_COUNT = 100
+
+
+def _tinytruthfulqa_task(task_manager: TaskManager) -> tuple[Any, dict[str, int]]:
+    """Keep the standard estimate only for a complete set of anchor outcomes."""
+    task = task_manager.load_task_or_group("tinyTruthfulQA")["tinyTruthfulQA"]
+    aggregations = task.aggregation()
+    standard_aggregation = aggregations["acc"]
+    observed: dict[str, int] = {}
+
+    def aggregate_complete_anchors(items):
+        observed["num_examples_evaluated"] = len(items)
+        if len(items) != _TINYTRUTHFULQA_ANCHOR_COUNT:
+            return None
+        return standard_aggregation(items)
+
+    # This task instance belongs to this adapter run. Do not alter the shared
+    # task YAML, library estimator or any other task's aggregation behavior.
+    aggregations["acc"] = aggregate_complete_anchors
+    return task, observed
+
+
 def build_lmeval_config(job_spec: JobSpec) -> tuple[str, dict, str | None]:
     """Derive lm-evaluation-harness model backend + args from job spec.
 
@@ -1014,6 +1036,12 @@ class LMEvalAdapter(FrameworkAdapter):
                     lmeval_task,
                 )
 
+            evaluation_tasks = [lmeval_task]
+            anchor_counts: dict[str, int] = {}
+            if lmeval_task == "tinyTruthfulQA":
+                task, anchor_counts = _tinytruthfulqa_task(task_manager)
+                evaluation_tasks = [task]
+
             # Phase 3: Running evaluation
             callbacks.report_status(
                 JobStatusUpdate(
@@ -1042,7 +1070,7 @@ class LMEvalAdapter(FrameworkAdapter):
                     results = simple_evaluate(
                         model=model_backend,
                         model_args=model_args,
-                        tasks=[lmeval_task],
+                        tasks=evaluation_tasks,
                         num_fewshot=int(num_fewshot),
                         apply_chat_template=apply_chat_template,
                         device="cpu",
@@ -1066,6 +1094,18 @@ class LMEvalAdapter(FrameworkAdapter):
 
             # Extract results
             task_results = _get_lmeval_task_results(results, lmeval_task)
+            skipped_aggregation = False
+            if lmeval_task == "tinyTruthfulQA":
+                actual_count = anchor_counts.get("num_examples_evaluated", 0)
+                if actual_count < 1:
+                    raise RuntimeError(
+                        "tinyTruthfulQA produced no completed sample outcomes"
+                    )
+                skipped_aggregation = actual_count != _TINYTRUTHFULQA_ANCHOR_COUNT
+                if skipped_aggregation:
+                    # Missing official scores are not zero scores. Omit all
+                    # metrics from the incomplete standard estimate.
+                    task_results = {}
 
             # For group tasks (e.g. leaderboard_bbh), lm-eval stores metrics under
             # subtask names, not the group name. Fall back to averaging subtask results.
@@ -1153,6 +1193,29 @@ class LMEvalAdapter(FrameworkAdapter):
 
             # Get number of examples evaluated
             num_examples_evaluated = _get_lmeval_evaluated_count(results, lmeval_task)
+            if skipped_aggregation:
+                num_examples_evaluated = anchor_counts["num_examples_evaluated"]
+                self._run_info.update(
+                    {
+                        "num_examples_evaluated": num_examples_evaluated,
+                        "aggregation": {
+                            "status": "skipped",
+                            "required_examples": _TINYTRUTHFULQA_ANCHOR_COUNT,
+                            "reason": (
+                                "The standard tinyTruthfulQA gpirt estimate requires "
+                                "exactly 100 predefined anchor outcomes in order. "
+                                "Sample execution completed; no official score "
+                                "was calculated."
+                            ),
+                        },
+                    }
+                )
+                logger.info(
+                    "tinyTruthfulQA completed %d sample outcomes; standard "
+                    "aggregation skipped (requires %d anchor outcomes)",
+                    num_examples_evaluated,
+                    _TINYTRUTHFULQA_ANCHOR_COUNT,
+                )
 
             duration = time.time() - start_time
 
@@ -1175,6 +1238,7 @@ class LMEvalAdapter(FrameworkAdapter):
                 results=evaluation_results,
                 metrics_schema=metrics_schema,
                 overall_score=overall_score,
+                additional_info=self._run_info if skipped_aggregation else None,
                 num_examples_evaluated=int(num_examples_evaluated)
                 if num_examples_evaluated is not None
                 else 0,
