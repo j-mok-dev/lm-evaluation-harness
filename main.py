@@ -91,6 +91,16 @@ def _needs_trust_remote_code(benchmark_id: str) -> bool:
     return benchmark_id in _BENCHMARKS_REQUIRING_REMOTE_CODE
 
 
+def _dataset_remote_code_parameter(parameters: dict[str, Any]) -> bool | None:
+    """Read an explicit dataset-script choice; None preserves existing policy."""
+    if "trust_remote_code" not in parameters:
+        return None
+    value = parameters["trust_remote_code"]
+    if not isinstance(value, bool):
+        raise ValueError("parameters.trust_remote_code must be a boolean")
+    return value
+
+
 # Benchmarks that intentionally execute model-generated Python through the
 # Hugging Face code_eval metric. Keep this allow list narrow: image-level or
 # user-provided HF_ALLOW_CODE_EVAL values must not enable execution for other
@@ -998,6 +1008,7 @@ class LMEvalAdapter(FrameworkAdapter):
             num_fewshot = int(benchmark_params.get("num_few_shot", 0))
             random_seed = int(benchmark_params.get("random_seed", 42))
             apply_chat_template = _chat_template_enabled(benchmark_params)
+            dataset_remote_code = _dataset_remote_code_parameter(benchmark_params)
 
             model_backend, model_args, gen_kwargs = build_lmeval_config(config)
 
@@ -1054,7 +1065,14 @@ class LMEvalAdapter(FrameworkAdapter):
             import datasets as _datasets
 
             _prev_trust_remote_code = _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE
-            if _needs_trust_remote_code(benchmark_id):
+            if dataset_remote_code is not None:
+                _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = dataset_remote_code
+                logger.info(
+                    "Dataset trust_remote_code explicitly set to %s for benchmark %s",
+                    dataset_remote_code,
+                    benchmark_id,
+                )
+            elif _needs_trust_remote_code(benchmark_id):
                 _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = True
                 logger.info("trust_remote_code enabled for benchmark %s", benchmark_id)
 
