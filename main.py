@@ -108,12 +108,33 @@ def _needs_code_execution(benchmark_id: str) -> bool:
     return benchmark_id in _BENCHMARKS_REQUIRING_CODE_EXECUTION
 
 
+_UNSAFE_CODE_OPT_IN_BENCHMARKS = _BENCHMARKS_REQUIRING_CODE_EXECUTION | {
+    "cruxeval_output",
+}
+
+
+def _unsafe_code_confirmed(benchmark_id: str, parameters: dict[str, Any]) -> bool:
+    """Require explicit consent for the supported code-execution benchmarks."""
+    confirmed = parameters.get("confirm_run_unsafe_code", False)
+    if not isinstance(confirmed, bool):
+        raise ValueError("parameters.confirm_run_unsafe_code must be a boolean")
+    if confirmed and benchmark_id not in _UNSAFE_CODE_OPT_IN_BENCHMARKS:
+        raise ValueError(
+            f"confirm_run_unsafe_code is not supported for benchmark {benchmark_id!r}"
+        )
+    return confirmed
+
+
 @contextmanager
-def _code_eval_environment(benchmark_id: str) -> Iterator[None]:
-    """Enable Hugging Face code_eval only for explicitly allowed benchmarks."""
+def _code_eval_environment(
+    benchmark_id: str, *, confirmed: bool = False
+) -> Iterator[None]:
+    """Enable HF code_eval only for confirmed, supported HF-metric tasks."""
     env_name = "HF_ALLOW_CODE_EVAL"
     previous = os.environ.get(env_name)
-    os.environ[env_name] = "1" if _needs_code_execution(benchmark_id) else "0"
+    os.environ[env_name] = (
+        "1" if confirmed and _needs_code_execution(benchmark_id) else "0"
+    )
     try:
         yield
     finally:
@@ -998,6 +1019,9 @@ class LMEvalAdapter(FrameworkAdapter):
             num_fewshot = int(benchmark_params.get("num_few_shot", 0))
             random_seed = int(benchmark_params.get("random_seed", 42))
             apply_chat_template = _chat_template_enabled(benchmark_params)
+            confirm_run_unsafe_code = _unsafe_code_confirmed(
+                benchmark_id, benchmark_params
+            )
 
             model_backend, model_args, gen_kwargs = build_lmeval_config(config)
 
@@ -1061,10 +1085,12 @@ class LMEvalAdapter(FrameworkAdapter):
             # Run evaluation based on job spec
             # Note: batch_size is passed in model_args for local-completions backend
             try:
-                with _code_eval_environment(benchmark_id):
-                    if _needs_code_execution(benchmark_id):
+                with _code_eval_environment(
+                    benchmark_id, confirmed=confirm_run_unsafe_code
+                ):
+                    if confirm_run_unsafe_code:
                         logger.warning(
-                            "code execution enabled for allow-listed benchmark %s",
+                            "Code execution explicitly confirmed for benchmark %s",
                             benchmark_id,
                         )
                     results = simple_evaluate(
@@ -1081,6 +1107,7 @@ class LMEvalAdapter(FrameworkAdapter):
                         task_manager=task_manager,
                         log_samples=True,
                         gen_kwargs=gen_kwargs,
+                        confirm_run_unsafe_code=confirm_run_unsafe_code,
                     )
             finally:
                 _datasets.config.HF_DATASETS_TRUST_REMOTE_CODE = _prev_trust_remote_code

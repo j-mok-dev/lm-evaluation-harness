@@ -34,7 +34,7 @@ def test_code_eval_environment_is_scoped_and_restored(
 ) -> None:
     monkeypatch.setenv("HF_ALLOW_CODE_EVAL", "previous")
 
-    with _code_eval_environment(benchmark_id):
+    with _code_eval_environment(benchmark_id, confirmed=True):
         assert os.environ["HF_ALLOW_CODE_EVAL"] == expected
 
     assert os.environ["HF_ALLOW_CODE_EVAL"] == "previous"
@@ -45,7 +45,7 @@ def test_code_eval_environment_restores_an_unset_variable(
 ) -> None:
     monkeypatch.delenv("HF_ALLOW_CODE_EVAL", raising=False)
 
-    with _code_eval_environment("humaneval"):
+    with _code_eval_environment("humaneval", confirmed=True):
         assert os.environ["HF_ALLOW_CODE_EVAL"] == "1"
 
     assert "HF_ALLOW_CODE_EVAL" not in os.environ
@@ -57,7 +57,7 @@ def test_code_eval_environment_restores_after_an_error(
     monkeypatch.setenv("HF_ALLOW_CODE_EVAL", "previous")
 
     with pytest.raises(RuntimeError, match="boom"):
-        with _code_eval_environment("humaneval"):
+        with _code_eval_environment("humaneval", confirmed=True):
             raise RuntimeError("boom")
 
     assert os.environ["HF_ALLOW_CODE_EVAL"] == "previous"
